@@ -31,6 +31,9 @@
 #define NGX_HTTP_IMAGE_GIF       2
 #define NGX_HTTP_IMAGE_PNG       3
 
+#define NGX_HTTP_IMAGE_SIZING_ABS	0
+#define NGX_HTTP_IMAGE_SIZING_REL	1
+
 
 #define NGX_HTTP_IMAGE_BUFFERED  0x08
 
@@ -39,13 +42,16 @@ typedef struct {
     ngx_uint_t                   filter;
     ngx_uint_t                   width;
     ngx_uint_t                   height;
+    ngx_uint_t                   percentage;
     ngx_uint_t                   jpeg_quality;
+    ngx_uint_t                   sizing_mode;
 
     ngx_flag_t                   transparency;
 
     ngx_http_complex_value_t    *wcv;
     ngx_http_complex_value_t    *hcv;
     ngx_http_complex_value_t    *jqcv;
+    ngx_http_complex_value_t    *pcv;
 
     size_t                       buffer_size;
 } ngx_http_image_filter_conf_t;
@@ -80,7 +86,8 @@ static ngx_buf_t *ngx_http_image_asis(ngx_http_request_t *r,
     ngx_http_image_filter_ctx_t *ctx);
 static void ngx_http_image_length(ngx_http_request_t *r, ngx_buf_t *b);
 static ngx_int_t ngx_http_image_size(ngx_http_request_t *r,
-    ngx_http_image_filter_ctx_t *ctx);
+    ngx_http_image_filter_ctx_t *ctx,
+    ngx_http_image_filter_conf_t  *conf);
 
 static ngx_buf_t *ngx_http_image_resize(ngx_http_request_t *r,
     ngx_http_image_filter_ctx_t *ctx);
@@ -485,9 +492,9 @@ ngx_http_image_process(ngx_http_request_t *r)
 
     ctx = ngx_http_get_module_ctx(r, ngx_http_image_filter_module);
 
-    rc = ngx_http_image_size(r, ctx);
-
     conf = ngx_http_get_module_loc_conf(r, ngx_http_image_filter_module);
+
+    rc = ngx_http_image_size(r, ctx, conf);
 
     if (conf->filter == NGX_HTTP_IMAGE_SIZE) {
         return ngx_http_image_json(r, rc == NGX_OK ? ctx : NULL);
@@ -604,7 +611,7 @@ ngx_http_image_length(ngx_http_request_t *r, ngx_buf_t *b)
 
 
 static ngx_int_t
-ngx_http_image_size(ngx_http_request_t *r, ngx_http_image_filter_ctx_t *ctx)
+ngx_http_image_size(ngx_http_request_t *r, ngx_http_image_filter_ctx_t *ctx, ngx_http_image_filter_conf_t  *conf)
 {
     u_char      *p, *last;
     size_t       len, app;
@@ -702,6 +709,12 @@ ngx_http_image_size(ngx_http_request_t *r, ngx_http_image_filter_ctx_t *ctx)
 
     ctx->width = width;
     ctx->height = height;
+
+    if (conf->sizing_mode == NGX_HTTP_IMAGE_SIZING_REL) {
+        float pct = ((float) ngx_http_image_filter_get_value(r, conf->pcv, conf->percentage)) / 100;
+        conf->width = (ngx_uint_t) ctx->width * pct;
+        conf->height = (ngx_uint_t) ctx->height * pct;
+    }
 
     return NGX_OK;
 }
@@ -1151,11 +1164,14 @@ ngx_http_image_filter_merge_conf(ngx_conf_t *cf, void *parent, void *child)
             conf->filter = NGX_HTTP_IMAGE_OFF;
 
         } else {
+            conf->sizing_mode = prev->sizing_mode;
             conf->filter = prev->filter;
             conf->width = prev->width;
             conf->height = prev->height;
+            conf->percentage = prev->percentage;
             conf->wcv = prev->wcv;
             conf->hcv = prev->hcv;
+            conf->pcv = prev->pcv;
         }
     }
 
@@ -1207,6 +1223,13 @@ ngx_http_image_filter(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         return NGX_CONF_OK;
     }
 
+    if (ngx_strcmp(value[i].data, "percentage") == 0) {
+        imcf->sizing_mode = NGX_HTTP_IMAGE_SIZING_REL;
+        i++;
+    } else {
+        imcf->sizing_mode = NGX_HTTP_IMAGE_SIZING_ABS;
+    }
+
     if (ngx_strcmp(value[i].data, "resize") == 0) {
         imcf->filter = NGX_HTTP_IMAGE_RESIZE;
 
@@ -1222,58 +1245,89 @@ ngx_http_image_filter(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     ngx_memzero(&ccv, sizeof(ngx_http_compile_complex_value_t));
 
-    ccv.cf = cf;
-    ccv.value = &value[++i];
-    ccv.complex_value = &cv;
+    if (imcf->sizing_mode == NGX_HTTP_IMAGE_SIZING_ABS) {
+        ccv.cf = cf;
+        ccv.value = &value[++i];
+        ccv.complex_value = &cv;
 
-    if (ngx_http_compile_complex_value(&ccv) != NGX_OK) {
-        return NGX_CONF_ERROR;
-    }
-
-    if (cv.lengths == NULL) {
-        n = ngx_http_image_filter_value(&value[i]);
-
-        if (n == 0) {
-            goto failed;
-        }
-
-        imcf->width = (ngx_uint_t) n;
-
-    } else {
-        imcf->wcv = ngx_palloc(cf->pool, sizeof(ngx_http_complex_value_t));
-        if (imcf->wcv == NULL) {
+        if (ngx_http_compile_complex_value(&ccv) != NGX_OK) {
             return NGX_CONF_ERROR;
         }
 
-        *imcf->wcv = cv;
-    }
+        if (cv.lengths == NULL) {
+            n = ngx_http_image_filter_value(&value[i]);
 
-    ngx_memzero(&ccv, sizeof(ngx_http_compile_complex_value_t));
+            if (n == 0) {
+                goto failed;
+            }
 
-    ccv.cf = cf;
-    ccv.value = &value[++i];
-    ccv.complex_value = &cv;
+            imcf->width = (ngx_uint_t) n;
 
-    if (ngx_http_compile_complex_value(&ccv) != NGX_OK) {
-        return NGX_CONF_ERROR;
-    }
+        } else {
+            imcf->wcv = ngx_palloc(cf->pool, sizeof(ngx_http_complex_value_t));
+            if (imcf->wcv == NULL) {
+                return NGX_CONF_ERROR;
+            }
 
-    if (cv.lengths == NULL) {
-        n = ngx_http_image_filter_value(&value[i]);
-
-        if (n == 0) {
-            goto failed;
+            *imcf->wcv = cv;
         }
 
-        imcf->height = (ngx_uint_t) n;
+        ngx_memzero(&ccv, sizeof(ngx_http_compile_complex_value_t));
 
-    } else {
-        imcf->hcv = ngx_palloc(cf->pool, sizeof(ngx_http_complex_value_t));
-        if (imcf->hcv == NULL) {
+        ccv.cf = cf;
+        ccv.value = &value[++i];
+        ccv.complex_value = &cv;
+
+        if (ngx_http_compile_complex_value(&ccv) != NGX_OK) {
             return NGX_CONF_ERROR;
         }
 
-        *imcf->hcv = cv;
+        if (cv.lengths == NULL) {
+            n = ngx_http_image_filter_value(&value[i]);
+
+            if (n == 0) {
+                goto failed;
+            }
+
+            imcf->height = (ngx_uint_t) n;
+
+        } else {
+            imcf->hcv = ngx_palloc(cf->pool, sizeof(ngx_http_complex_value_t));
+            if (imcf->hcv == NULL) {
+                return NGX_CONF_ERROR;
+            }
+
+            *imcf->hcv = cv;
+        }
+    } else {
+        // relative (percentage) resizing mode
+
+        ccv.cf = cf;
+        ccv.value = &value[++i];
+        ccv.complex_value = &cv;
+
+        if (ngx_http_compile_complex_value(&ccv) != NGX_OK) {
+            return NGX_CONF_ERROR;
+        }
+
+        if (cv.lengths == NULL) {
+            n = ngx_http_image_filter_value(&value[i]);
+
+            if (n == 0) {
+                goto failed;
+            }
+
+            imcf->percentage = (ngx_uint_t) n;
+
+        } else {
+            imcf->pcv = ngx_palloc(cf->pool, sizeof(ngx_http_complex_value_t));
+            if (imcf->pcv == NULL) {
+                return NGX_CONF_ERROR;
+            }
+
+            *imcf->pcv = cv;
+        }
+        
     }
 
     return NGX_CONF_OK;
