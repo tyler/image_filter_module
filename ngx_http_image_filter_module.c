@@ -16,6 +16,7 @@
 #define NGX_HTTP_IMAGE_SIZE      2
 #define NGX_HTTP_IMAGE_RESIZE    3
 #define NGX_HTTP_IMAGE_CROP      4
+#define NGX_HTTP_IMAGE_BOX       5
 
 
 #define NGX_HTTP_IMAGE_START     0
@@ -506,7 +507,8 @@ ngx_http_image_process(ngx_http_request_t *r)
     if (rc == NGX_OK
         && ctx->width <= ctx->max_width
         && ctx->height <= ctx->max_height
-        && !ctx->force)
+        && !ctx->force
+        && conf->filter != NGX_HTTP_IMAGE_BOX)
     {
         return ngx_http_image_asis(r, ctx);
     }
@@ -731,7 +733,8 @@ ngx_http_image_resize(ngx_http_request_t *r, ngx_http_image_filter_ctx_t *ctx)
 
     if (!ctx->force
         && (ngx_uint_t) sx <= ctx->max_width
-        && (ngx_uint_t) sy <= ctx->max_height)
+        && (ngx_uint_t) sy <= ctx->max_height
+        && conf->filter != NGX_HTTP_IMAGE_BOX)
     {
         gdImageDestroy(src);
         return ngx_http_image_asis(r, ctx);
@@ -765,7 +768,7 @@ transparent:
     dx = sx;
     dy = sy;
 
-    if (conf->filter == NGX_HTTP_IMAGE_RESIZE) {
+    if (conf->filter == NGX_HTTP_IMAGE_RESIZE || conf->filter == NGX_HTTP_IMAGE_BOX) {
 
         if ((ngx_uint_t) dx > ctx->max_width) {
             dy = dy * ctx->max_width / dx;
@@ -869,6 +872,45 @@ transparent:
             }
 
             gdImageCopy(dst, src, 0, 0, ox, oy, dx - ox, dy - oy);
+
+            if (colors) {
+                gdImageTrueColorToPalette(dst, 1, 256);
+            }
+
+            gdImageDestroy(src);
+        }
+
+    } else if (conf->filter == NGX_HTTP_IMAGE_BOX) {
+
+        src = dst;
+
+        if ((ngx_uint_t) dx < ctx->max_width) {
+            ox = ctx->max_width - dx;
+        } else {
+            ox = 0;
+        }
+
+        if ((ngx_uint_t) dy < ctx->max_height) {
+            oy = ctx->max_height - dy;
+        } else {
+            oy = 0;
+        }
+
+        if(ox || oy) {
+            dst = ngx_http_image_new(r, dx + ox, dy + oy, colors);
+
+            ox /= 2; // we'll center it
+            oy /= 2;
+            
+            if (colors == 0) {
+                gdImageSaveAlpha(dst, 1);
+                gdImageAlphaBlending(dst, 0);
+            }
+
+            int white = gdImageColorAllocate(dst, 255, 255, 255);
+            gdImageFill(dst, 0, 0, white);
+
+            gdImageCopy(dst, src, ox, oy, 0, 0, dx, dy);
 
             if (colors) {
                 gdImageTrueColorToPalette(dst, 1, 256);
@@ -1170,6 +1212,9 @@ ngx_http_image_filter(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     } else if (ngx_strcmp(value[i].data, "crop") == 0) {
         imcf->filter = NGX_HTTP_IMAGE_CROP;
+
+    } else if (ngx_strcmp(value[i].data, "box") == 0) {
+        imcf->filter = NGX_HTTP_IMAGE_BOX;
 
     } else {
         goto failed;
