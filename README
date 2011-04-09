@@ -1,0 +1,3 @@
+Nginx's image filter module. It's part of the standard library of modules, but I've written some patches to it which may be useful to you.
+
+It's from version 0.8.54.
